@@ -205,9 +205,11 @@ const getAllEmployees = async (queryParams = {}) => {
 
   // 7. Execute Paginated Database Query
   const skip = (pageNum - 1) * limitNum;
+  const findQuery = Employee.find(query);
+  const execQuery = typeof findQuery.lean === "function" ? findQuery.lean() : findQuery;
 
   const [employees, total] = await Promise.all([
-    Employee.find(query).sort(sortOptions).skip(skip).limit(limitNum),
+    execQuery.sort(sortOptions).skip(skip).limit(limitNum),
     Employee.countDocuments(query)
   ]);
 

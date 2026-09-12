@@ -34,7 +34,7 @@ const employmentHistorySchema = new mongoose.Schema(
 );
 
 employmentHistorySchema.index({ employeeId: 1, eventDate: -1 });
-employmentHistorySchema.index({ eventType: 1 });
+employmentHistorySchema.index({ eventType: 1, eventDate: -1 });
 employmentHistorySchema.index({ eventDate: -1 });
 
 module.exports = mongoose.model("EmploymentHistory", employmentHistorySchema);

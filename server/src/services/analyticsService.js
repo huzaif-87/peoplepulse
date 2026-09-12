@@ -18,13 +18,33 @@ const EmploymentHistory = require("../models/EmploymentHistory");
 const roundOneDecimal = (num) =>
   typeof num === "number" && !isNaN(num) ? Math.round(num * 10) / 10 : 0;
 
-const getDashboardAnalytics = async () => {
+// Development-only timer utility for tracking execution times
+const logExecutionTime = (label, startTime) => {
+  if (process.env.NODE_ENV !== "production") {
+    const elapsed = (performance.now() - startTime).toFixed(2);
+    console.log(`[Analytics Perf] ${label}: ${elapsed} ms`);
+  }
+};
+
+// 1. Headcount & Demographics Analytics
+const getHeadcountAnalytics = async () => {
+  const start = performance.now();
   const currentYear = new Date().getFullYear();
   const startOfYear = new Date(Date.UTC(currentYear, 0, 1, 0, 0, 0, 0));
   const endOfYear = new Date(Date.UTC(currentYear, 11, 31, 23, 59, 59, 999));
 
-  // 1. Headcount & Demographics
-  const [total, active, onLeave, inactive, newHires] = await Promise.all([
+  const [
+    total,
+    active,
+    onLeave,
+    inactive,
+    newHires,
+    departmentDistribution,
+    locationDistribution,
+    employmentTypeDistribution,
+    joiningYearDistribution,
+    hiringTrendAgg
+  ] = await Promise.all([
     Employee.countDocuments({}),
     Employee.countDocuments({ status: "Active" }),
     Employee.countDocuments({ status: "On Leave" }),
@@ -32,7 +52,46 @@ const getDashboardAnalytics = async () => {
     EmploymentHistory.countDocuments({
       eventType: "Joined",
       eventDate: { $gte: startOfYear, $lte: endOfYear }
-    })
+    }),
+    Employee.aggregate([
+      { $group: { _id: "$department", count: { $sum: 1 } } },
+      { $project: { _id: 0, department: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]),
+    Employee.aggregate([
+      { $group: { _id: "$location", count: { $sum: 1 } } },
+      { $project: { _id: 0, location: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]),
+    Employee.aggregate([
+      { $group: { _id: "$employmentType", count: { $sum: 1 } } },
+      { $project: { _id: 0, employmentType: "$_id", count: 1 } },
+      { $sort: { count: -1 } }
+    ]),
+    Employee.aggregate([
+      {
+        $group: {
+          _id: { $year: "$joiningDate" },
+          count: { $sum: 1 }
+        }
+      },
+      { $project: { _id: 0, year: "$_id", count: 1 } },
+      { $sort: { year: 1 } }
+    ]),
+    EmploymentHistory.aggregate([
+      {
+        $match: {
+          eventType: "Joined",
+          eventDate: { $gte: startOfYear, $lte: endOfYear }
+        }
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m", date: "$eventDate" } },
+          count: { $sum: 1 }
+        }
+      }
+    ])
   ]);
 
   const headcount = {
@@ -43,57 +102,8 @@ const getDashboardAnalytics = async () => {
     newHires
   };
 
-  // 2. Department Distribution
-  const departmentDistribution = await Employee.aggregate([
-    { $group: { _id: "$department", count: { $sum: 1 } } },
-    { $project: { _id: 0, department: "$_id", count: 1 } },
-    { $sort: { count: -1 } }
-  ]);
-
-  // 3. Location Distribution
-  const locationDistribution = await Employee.aggregate([
-    { $group: { _id: "$location", count: { $sum: 1 } } },
-    { $project: { _id: 0, location: "$_id", count: 1 } },
-    { $sort: { count: -1 } }
-  ]);
-
-  // 3b. Employment Type Distribution
-  const employmentTypeDistribution = await Employee.aggregate([
-    { $group: { _id: "$employmentType", count: { $sum: 1 } } },
-    { $project: { _id: 0, employmentType: "$_id", count: 1 } },
-    { $sort: { count: -1 } }
-  ]);
-
-  // 3c. Joining Year Distribution
-  const joiningYearDistribution = await Employee.aggregate([
-    {
-      $group: {
-        _id: { $year: "$joiningDate" },
-        count: { $sum: 1 }
-      }
-    },
-    { $project: { _id: 0, year: "$_id", count: 1 } },
-    { $sort: { year: 1 } }
-  ]);
-
-  // 4. Hiring Trend (All 12 months for current calendar year)
-  const hiringTrendAgg = await EmploymentHistory.aggregate([
-    {
-      $match: {
-        eventType: "Joined",
-        eventDate: { $gte: startOfYear, $lte: endOfYear }
-      }
-    },
-    {
-      $group: {
-        _id: { $dateToString: { format: "%Y-%m", date: "$eventDate" } },
-        count: { $sum: 1 }
-      }
-    }
-  ]);
-
   const hiringMap = {};
-  hiringTrendAgg.forEach((item) => {
+  (hiringTrendAgg || []).forEach((item) => {
     hiringMap[item._id] = item.count;
   });
 
@@ -106,8 +116,37 @@ const getDashboardAnalytics = async () => {
     });
   }
 
-  // 5. Attendance Analytics & Status Breakdown & Trend
-  const [attendanceAgg, attendanceTrend] = await Promise.all([
+  const result = {
+    headcount,
+    departmentDistribution: departmentDistribution || [],
+    locationDistribution: locationDistribution || [],
+    employmentTypeDistribution: employmentTypeDistribution || [],
+    joiningYearDistribution: joiningYearDistribution || [],
+    hiringTrend
+  };
+
+  logExecutionTime("getHeadcountAnalytics", start);
+  return result;
+};
+
+// 2. Attendance & Leave Analytics
+const getAttendanceAnalytics = async (totalEmployeesCount) => {
+  const start = performance.now();
+
+  const totalEmpPromise =
+    typeof totalEmployeesCount === "number"
+      ? Promise.resolve(totalEmployeesCount)
+      : Employee.countDocuments({});
+
+  const [
+    attendanceAgg,
+    attendanceTrend,
+    pendingRequests,
+    approvedRequests,
+    rejectedRequests,
+    approvedEmployees,
+    total
+  ] = await Promise.all([
     Attendance.aggregate([
       {
         $group: {
@@ -159,7 +198,12 @@ const getDashboardAnalytics = async () => {
         }
       },
       { $sort: { month: 1 } }
-    ])
+    ]),
+    LeaveRequest.countDocuments({ status: "Pending" }),
+    LeaveRequest.countDocuments({ status: "Approved" }),
+    LeaveRequest.countDocuments({ status: "Rejected" }),
+    LeaveRequest.distinct("employeeId", { status: "Approved" }),
+    totalEmpPromise
   ]);
 
   let attendance = {
@@ -170,16 +214,14 @@ const getDashboardAnalytics = async () => {
     statusBreakdown: { present: 0, late: 0, halfDay: 0, absent: 0 }
   };
 
-  if (attendanceAgg.length > 0 && attendanceAgg[0].totalRecords > 0) {
+  if (attendanceAgg && attendanceAgg.length > 0 && attendanceAgg[0].totalRecords > 0) {
     const a = attendanceAgg[0];
     attendance = {
       attendanceRate: roundOneDecimal((a.presentCount / a.totalRecords) * 100),
       lateRate: roundOneDecimal((a.lateCount / a.totalRecords) * 100),
       absenceRate: roundOneDecimal((a.absentCount / a.totalRecords) * 100),
       averageWorkingHours:
-        a.workingHoursCount > 0
-          ? roundOneDecimal(a.totalWorkingHours / a.workingHoursCount)
-          : 0,
+        a.workingHoursCount > 0 ? roundOneDecimal(a.totalWorkingHours / a.workingHoursCount) : 0,
       statusBreakdown: {
         present: a.presentOnlyCount || 0,
         late: a.lateCount || 0,
@@ -189,17 +231,8 @@ const getDashboardAnalytics = async () => {
     };
   }
 
-  // 6. Leave Analytics
-  const [pendingRequests, approvedRequests, rejectedRequests, approvedEmployees] =
-    await Promise.all([
-      LeaveRequest.countDocuments({ status: "Pending" }),
-      LeaveRequest.countDocuments({ status: "Approved" }),
-      LeaveRequest.countDocuments({ status: "Rejected" }),
-      LeaveRequest.distinct("employeeId", { status: "Approved" })
-    ]);
-
   const leaveRate =
-    total > 0 ? roundOneDecimal((approvedEmployees.length / total) * 100) : 0;
+    total > 0 ? roundOneDecimal(((approvedEmployees || []).length / total) * 100) : 0;
 
   const leave = {
     leaveRate,
@@ -208,8 +241,21 @@ const getDashboardAnalytics = async () => {
     rejectedRequests
   };
 
-  // 7. Performance Analytics & Distribution
-  const [perfAgg, performanceRatingDistribution] = await Promise.all([
+  const result = {
+    attendance,
+    attendanceTrend: attendanceTrend || [],
+    leave
+  };
+
+  logExecutionTime("getAttendanceAnalytics", start);
+  return result;
+};
+
+// 3. Performance Analytics
+const getPerformanceAnalytics = async () => {
+  const start = performance.now();
+
+  const [perfAgg, performanceRatingDistribution, performanceByDepartment] = await Promise.all([
     PerformanceReview.aggregate([
       {
         $group: {
@@ -239,97 +285,8 @@ const getDashboardAnalytics = async () => {
       },
       { $group: { _id: "$category", count: { $sum: 1 } } },
       { $project: { _id: 0, category: "$_id", count: 1 } }
-    ])
-  ]);
-
-  let performance = {
-    averageOverallScore: 0,
-    averageProductivityScore: 0,
-    averageTeamworkScore: 0,
-    averageCommunicationScore: 0,
-    averageGoalsCompleted: 0
-  };
-
-  if (perfAgg.length > 0) {
-    const p = perfAgg[0];
-    performance = {
-      averageOverallScore: roundOneDecimal(p.averageOverallScore),
-      averageProductivityScore: roundOneDecimal(p.averageProductivityScore),
-      averageTeamworkScore: roundOneDecimal(p.averageTeamworkScore),
-      averageCommunicationScore: roundOneDecimal(p.averageCommunicationScore),
-      averageGoalsCompleted: roundOneDecimal(p.averageGoalsCompleted)
-    };
-  }
-
-  // 8. Performance By Department
-  const performanceByDepartment = await PerformanceReview.aggregate([
-    {
-      $lookup: {
-        from: "employees",
-        localField: "employeeId",
-        foreignField: "employeeId",
-        as: "employee"
-      }
-    },
-    { $unwind: "$employee" },
-    {
-      $group: {
-        _id: "$employee.department",
-        averageScore: { $avg: "$overallScore" }
-      }
-    },
-    {
-      $project: {
-        _id: 0,
-        department: "$_id",
-        averageScore: { $round: ["$averageScore", 1] }
-      }
-    },
-    { $sort: { averageScore: -1 } }
-  ]);
-
-  // 9. Financial Analytics (Latest Payroll Month)
-  const latestPayrollDoc = await Payroll.findOne().sort({ month: -1 }).select("month").lean();
-  const latestPayrollMonth = latestPayrollDoc ? latestPayrollDoc.month : null;
-
-  let financial = {
-    latestPayrollMonth,
-    monthlyPayroll: 0,
-    benefitsCost: 0,
-    bonusCost: 0,
-    averageBaseSalary: 0
-  };
-
-  let payrollByDepartment = [];
-
-  if (latestPayrollMonth) {
-    const finAgg = await Payroll.aggregate([
-      { $match: { month: latestPayrollMonth } },
-      {
-        $group: {
-          _id: null,
-          monthlyPayroll: { $sum: "$totalCost" },
-          benefitsCost: { $sum: "$benefits" },
-          bonusCost: { $sum: "$bonus" },
-          averageBaseSalary: { $avg: "$baseSalary" }
-        }
-      }
-    ]);
-
-    if (finAgg.length > 0) {
-      const f = finAgg[0];
-      financial = {
-        latestPayrollMonth,
-        monthlyPayroll: Math.round(f.monthlyPayroll),
-        benefitsCost: Math.round(f.benefitsCost),
-        bonusCost: Math.round(f.bonusCost),
-        averageBaseSalary: Math.round(f.averageBaseSalary)
-      };
-    }
-
-    // 10. Payroll By Department
-    payrollByDepartment = await Payroll.aggregate([
-      { $match: { month: latestPayrollMonth } },
+    ]),
+    PerformanceReview.aggregate([
       {
         $lookup: {
           from: "employees",
@@ -342,44 +299,174 @@ const getDashboardAnalytics = async () => {
       {
         $group: {
           _id: "$employee.department",
-          payrollCost: { $sum: "$totalCost" }
+          averageScore: { $avg: "$overallScore" }
         }
       },
       {
         $project: {
           _id: 0,
           department: "$_id",
-          payrollCost: { $round: ["$payrollCost", 0] }
+          averageScore: { $round: ["$averageScore", 1] }
         }
       },
-      { $sort: { payrollCost: -1 } }
-    ]);
-  }
-
-  // 10b. Historical Payroll Trend
-  const payrollTrend = await Payroll.aggregate([
-    {
-      $group: {
-        _id: "$month",
-        totalPayroll: { $sum: "$totalCost" },
-        benefitsCost: { $sum: "$benefits" },
-        bonusCost: { $sum: "$bonus" }
-      }
-    },
-    {
-      $project: {
-        _id: 0,
-        month: "$_id",
-        totalPayroll: { $round: ["$totalPayroll", 0] },
-        benefitsCost: { $round: ["$benefitsCost", 0] },
-        bonusCost: { $round: ["$bonusCost", 0] }
-      }
-    },
-    { $sort: { month: 1 } }
+      { $sort: { averageScore: -1 } }
+    ])
   ]);
 
-  // 11. Retention & Turnover
-  const [resignations, newJoiners] = await Promise.all([
+  let performanceMetrics = {
+    averageOverallScore: 0,
+    averageProductivityScore: 0,
+    averageTeamworkScore: 0,
+    averageCommunicationScore: 0,
+    averageGoalsCompleted: 0
+  };
+
+  if (perfAgg && perfAgg.length > 0) {
+    const p = perfAgg[0];
+    performanceMetrics = {
+      averageOverallScore: roundOneDecimal(p.averageOverallScore),
+      averageProductivityScore: roundOneDecimal(p.averageProductivityScore),
+      averageTeamworkScore: roundOneDecimal(p.averageTeamworkScore),
+      averageCommunicationScore: roundOneDecimal(p.averageCommunicationScore),
+      averageGoalsCompleted: roundOneDecimal(p.averageGoalsCompleted)
+    };
+  }
+
+  const result = {
+    performance: performanceMetrics,
+    performanceRatingDistribution: performanceRatingDistribution || [],
+    performanceByDepartment: performanceByDepartment || []
+  };
+
+  logExecutionTime("getPerformanceAnalytics", start);
+  return result;
+};
+
+// 4. Financial & Payroll Analytics
+const getFinancialAnalytics = async () => {
+  const start = performance.now();
+
+  const latestPayrollDoc = await Payroll.findOne().sort({ month: -1 }).select("month").lean();
+  const latestPayrollMonth = latestPayrollDoc ? latestPayrollDoc.month : null;
+
+  let financial = {
+    latestPayrollMonth,
+    monthlyPayroll: 0,
+    benefitsCost: 0,
+    bonusCost: 0,
+    averageBaseSalary: 0
+  };
+
+  let payrollByDepartment = [];
+  let payrollTrend = [];
+
+  if (latestPayrollMonth) {
+    const [finAgg, deptAgg, trendAgg] = await Promise.all([
+      Payroll.aggregate([
+        { $match: { month: latestPayrollMonth } },
+        {
+          $group: {
+            _id: null,
+            monthlyPayroll: { $sum: "$totalCost" },
+            benefitsCost: { $sum: "$benefits" },
+            bonusCost: { $sum: "$bonus" },
+            averageBaseSalary: { $avg: "$baseSalary" }
+          }
+        }
+      ]),
+      Payroll.aggregate([
+        { $match: { month: latestPayrollMonth } },
+        {
+          $lookup: {
+            from: "employees",
+            localField: "employeeId",
+            foreignField: "employeeId",
+            as: "employee"
+          }
+        },
+        { $unwind: "$employee" },
+        {
+          $group: {
+            _id: "$employee.department",
+            payrollCost: { $sum: "$totalCost" }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            department: "$_id",
+            payrollCost: { $round: ["$payrollCost", 0] }
+          }
+        },
+        { $sort: { payrollCost: -1 } }
+      ]),
+      Payroll.aggregate([
+        {
+          $group: {
+            _id: "$month",
+            totalPayroll: { $sum: "$totalCost" },
+            benefitsCost: { $sum: "$benefits" },
+            bonusCost: { $sum: "$bonus" }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            month: "$_id",
+            totalPayroll: { $round: ["$totalPayroll", 0] },
+            benefitsCost: { $round: ["$benefitsCost", 0] },
+            bonusCost: { $round: ["$bonusCost", 0] }
+          }
+        },
+        { $sort: { month: 1 } }
+      ])
+    ]);
+
+    if (finAgg && finAgg.length > 0) {
+      const f = finAgg[0];
+      financial = {
+        latestPayrollMonth,
+        monthlyPayroll: Math.round(f.monthlyPayroll),
+        benefitsCost: Math.round(f.benefitsCost),
+        bonusCost: Math.round(f.bonusCost),
+        averageBaseSalary: Math.round(f.averageBaseSalary)
+      };
+    }
+
+    payrollByDepartment = deptAgg || [];
+    payrollTrend = trendAgg || [];
+  }
+
+  const result = {
+    financial,
+    payrollByDepartment,
+    payrollTrend
+  };
+
+  logExecutionTime("getFinancialAnalytics", start);
+  return result;
+};
+
+// 5. Retention & Turnover Analytics
+const getRetentionAnalytics = async (totalEmployeesCount) => {
+  const start = performance.now();
+  const currentYear = new Date().getFullYear();
+  const startOfYear = new Date(Date.UTC(currentYear, 0, 1, 0, 0, 0, 0));
+  const endOfYear = new Date(Date.UTC(currentYear, 11, 31, 23, 59, 59, 999));
+
+  const totalEmpPromise =
+    typeof totalEmployeesCount === "number"
+      ? Promise.resolve(totalEmployeesCount)
+      : Employee.countDocuments({});
+
+  const [
+    resignations,
+    newJoiners,
+    turnoverByDepartment,
+    turnoverTrend,
+    recentEmploymentEvents,
+    total
+  ] = await Promise.all([
     EmploymentHistory.countDocuments({
       eventType: "Resigned",
       eventDate: { $gte: startOfYear, $lte: endOfYear }
@@ -387,38 +474,11 @@ const getDashboardAnalytics = async () => {
     EmploymentHistory.countDocuments({
       eventType: "Joined",
       eventDate: { $gte: startOfYear, $lte: endOfYear }
-    })
-  ]);
-
-  const turnoverRate = total > 0 ? roundOneDecimal((resignations / total) * 100) : 0;
-
-  const retention = {
-    turnoverRate,
-    resignations,
-    newJoiners
-  };
-
-  // 12. Turnover By Department & Turnover Trend
-  const [turnoverByDepartment, turnoverTrend] = await Promise.all([
+    }),
     EmploymentHistory.aggregate([
-      {
-        $match: {
-          eventType: "Resigned"
-        }
-      },
-      {
-        $group: {
-          _id: "$department",
-          resignations: { $sum: 1 }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          department: "$_id",
-          resignations: 1
-        }
-      },
+      { $match: { eventType: "Resigned" } },
+      { $group: { _id: "$department", resignations: { $sum: 1 } } },
+      { $project: { _id: 0, department: "$_id", resignations: 1 } },
       { $sort: { resignations: -1 } }
     ]),
     EmploymentHistory.aggregate([
@@ -442,57 +502,88 @@ const getDashboardAnalytics = async () => {
           }
         }
       },
+      { $project: { _id: 0, month: "$_id", resignations: 1, newHires: 1 } },
+      { $sort: { month: 1 } }
+    ]),
+    EmploymentHistory.aggregate([
+      { $sort: { eventDate: -1 } },
+      { $limit: 8 },
+      {
+        $lookup: {
+          from: "employees",
+          localField: "employeeId",
+          foreignField: "employeeId",
+          as: "employee"
+        }
+      },
       {
         $project: {
           _id: 0,
-          month: "$_id",
-          resignations: 1,
-          newHires: 1
+          employeeId: 1,
+          firstName: { $arrayElemAt: ["$employee.firstName", 0] },
+          lastName: { $arrayElemAt: ["$employee.lastName", 0] },
+          eventType: 1,
+          eventDate: 1,
+          department: 1,
+          reason: 1
         }
-      },
-      { $sort: { month: 1 } }
-    ])
+      }
+    ]),
+    totalEmpPromise
   ]);
 
-  // 13. Recent Employment Events (Latest 8 events)
-  const recentEmploymentEvents = await EmploymentHistory.aggregate([
-    { $sort: { eventDate: -1 } },
-    { $limit: 8 },
-    {
-      $lookup: {
-        from: "employees",
-        localField: "employeeId",
-        foreignField: "employeeId",
-        as: "employee"
-      }
-    },
-    {
-      $project: {
-        _id: 0,
-        employeeId: 1,
-        firstName: { $arrayElemAt: ["$employee.firstName", 0] },
-        lastName: { $arrayElemAt: ["$employee.lastName", 0] },
-        eventType: 1,
-        eventDate: 1,
-        department: 1,
-        reason: 1
-      }
-    }
+  const turnoverRate = total > 0 ? roundOneDecimal((resignations / total) * 100) : 0;
+
+  const retention = {
+    turnoverRate,
+    resignations,
+    newJoiners
+  };
+
+  const result = {
+    retention,
+    turnoverByDepartment: turnoverByDepartment || [],
+    turnoverTrend: turnoverTrend || [],
+    recentEmploymentEvents: recentEmploymentEvents || []
+  };
+
+  logExecutionTime("getRetentionAnalytics", start);
+  return result;
+};
+
+// Consolidated Executive Dashboard Analytics
+const getDashboardAnalytics = async () => {
+  const start = performance.now();
+
+  const [headcountData, performanceData, financialData] = await Promise.all([
+    getHeadcountAnalytics(),
+    getPerformanceAnalytics(),
+    getFinancialAnalytics()
   ]);
 
-  // 14. Actionable Insights Engine (Deterministic JS)
+  const totalEmployees = headcountData.headcount.total;
+
+  const [attendanceData, retentionData] = await Promise.all([
+    getAttendanceAnalytics(totalEmployees),
+    getRetentionAnalytics(totalEmployees)
+  ]);
+
+  // Actionable Insights Engine (Deterministic JS)
   const insights = [];
 
-  if (leave.pendingRequests > 5) {
+  if (attendanceData.leave.pendingRequests > 5) {
     insights.push({
       type: "warning",
       title: "Pending Leave Requests",
-      message: `There are ${leave.pendingRequests} leave requests awaiting administrative review.`
+      message: `There are ${attendanceData.leave.pendingRequests} leave requests awaiting administrative review.`
     });
   }
 
-  if (turnoverByDepartment.length > 0 && turnoverByDepartment[0].resignations > 0) {
-    const topTurnover = turnoverByDepartment[0];
+  if (
+    retentionData.turnoverByDepartment.length > 0 &&
+    retentionData.turnoverByDepartment[0].resignations > 0
+  ) {
+    const topTurnover = retentionData.turnoverByDepartment[0];
     insights.push({
       type: "warning",
       title: "Turnover Hotspot",
@@ -500,52 +591,60 @@ const getDashboardAnalytics = async () => {
     });
   }
 
-  if (performance.averageOverallScore >= 4.0) {
+  if (performanceData.performance.averageOverallScore >= 4.0) {
     insights.push({
       type: "positive",
       title: "Strong Performance",
-      message: `Overall organization performance rating is strong at ${performance.averageOverallScore} / 5.0.`
+      message: `Overall organization performance rating is strong at ${performanceData.performance.averageOverallScore} / 5.0.`
     });
-  } else if (performance.averageOverallScore > 0) {
+  } else if (performanceData.performance.averageOverallScore > 0) {
     insights.push({
       type: "info",
       title: "Performance Tracking",
-      message: `Overall organization performance rating is currently at ${performance.averageOverallScore} / 5.0.`
+      message: `Overall organization performance rating is currently at ${performanceData.performance.averageOverallScore} / 5.0.`
     });
   }
 
-  if (attendance.attendanceRate >= 90.0) {
+  if (attendanceData.attendance.attendanceRate >= 90.0) {
     insights.push({
       type: "positive",
       title: "Healthy Attendance",
-      message: `Workforce attendance remains healthy at ${attendance.attendanceRate}%.`
+      message: `Workforce attendance remains healthy at ${attendanceData.attendance.attendanceRate}%.`
     });
   }
 
-  return {
-    headcount,
-    departmentDistribution,
-    locationDistribution,
-    employmentTypeDistribution,
-    joiningYearDistribution,
-    hiringTrend,
-    attendance,
-    attendanceTrend,
-    leave,
-    performance,
-    performanceRatingDistribution,
-    performanceByDepartment,
-    financial,
-    payrollByDepartment,
-    payrollTrend,
-    retention,
-    turnoverByDepartment,
-    turnoverTrend,
-    recentEmploymentEvents,
+  const result = {
+    headcount: headcountData.headcount,
+    departmentDistribution: headcountData.departmentDistribution,
+    locationDistribution: headcountData.locationDistribution,
+    employmentTypeDistribution: headcountData.employmentTypeDistribution,
+    joiningYearDistribution: headcountData.joiningYearDistribution,
+    hiringTrend: headcountData.hiringTrend,
+    attendance: attendanceData.attendance,
+    attendanceTrend: attendanceData.attendanceTrend,
+    leave: attendanceData.leave,
+    performance: performanceData.performance,
+    performanceRatingDistribution: performanceData.performanceRatingDistribution,
+    performanceByDepartment: performanceData.performanceByDepartment,
+    financial: financialData.financial,
+    payrollByDepartment: financialData.payrollByDepartment,
+    payrollTrend: financialData.payrollTrend,
+    retention: retentionData.retention,
+    turnoverByDepartment: retentionData.turnoverByDepartment,
+    turnoverTrend: retentionData.turnoverTrend,
+    recentEmploymentEvents: retentionData.recentEmploymentEvents,
     insights: insights.slice(0, 5)
   };
+
+  logExecutionTime("TOTAL getDashboardAnalytics", start);
+  return result;
 };
 
 module.exports = {
-  getDashboardAnalytics
+  getDashboardAnalytics,
+  getHeadcountAnalytics,
+  getAttendanceAnalytics,
+  getPerformanceAnalytics,
+  getFinancialAnalytics,
+  getRetentionAnalytics
 };

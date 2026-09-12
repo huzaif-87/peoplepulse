@@ -47,6 +47,6 @@ payrollSchema.pre("validate", function () {
 });
 
 payrollSchema.index({ employeeId: 1, month: 1 }, { unique: true });
-payrollSchema.index({ month: 1 });
+payrollSchema.index({ month: -1 });
 
 module.exports = mongoose.model("Payroll", payrollSchema);

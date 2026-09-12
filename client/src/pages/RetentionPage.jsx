@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import AppLayout from "../components/layout/AppLayout";
-import { getDashboardAnalytics } from "../services/analyticsService";
+import { getRetentionAnalytics } from "../services/analyticsService";
 import KpiCard from "../components/dashboard/KpiCard";
 import LightChartTooltip from "../components/dashboard/LightChartTooltip";
 import RecentEmploymentEvents from "../components/dashboard/RecentEmploymentEvents";
@@ -46,7 +46,7 @@ export const RetentionPage = () => {
     setError(null);
 
     try {
-      const response = await getDashboardAnalytics();
+      const response = await getRetentionAnalytics();
       if (response && response.success && response.data) {
         setAnalytics(response.data);
         setLastUpdated(

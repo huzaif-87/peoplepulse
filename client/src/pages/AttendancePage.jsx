@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import AppLayout from "../components/layout/AppLayout";
-import { getDashboardAnalytics } from "../services/analyticsService";
+import { getAttendanceAnalytics } from "../services/analyticsService";
 import KpiCard from "../components/dashboard/KpiCard";
 import LightChartTooltip from "../components/dashboard/LightChartTooltip";
 import { Skeleton } from "../components/common/Skeleton";
@@ -49,7 +49,7 @@ export const AttendancePage = () => {
     setError(null);
 
     try {
-      const response = await getDashboardAnalytics();
+      const response = await getAttendanceAnalytics();
       if (response && response.success && response.data) {
         setAnalytics(response.data);
         setLastUpdated(

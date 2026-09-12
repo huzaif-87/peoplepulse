@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import AppLayout from "../components/layout/AppLayout";
-import { getDashboardAnalytics } from "../services/analyticsService";
+import { getHeadcountAnalytics } from "../services/analyticsService";
 import KpiCard from "../components/dashboard/KpiCard";
 import { CustomChartTooltip } from "../components/dashboard/CustomChartTooltip";
 import { Skeleton } from "../components/common/Skeleton";
@@ -51,7 +51,7 @@ export const HeadcountPage = () => {
     setError(null);
 
     try {
-      const response = await getDashboardAnalytics();
+      const response = await getHeadcountAnalytics();
       if (response && response.success && response.data) {
         setAnalytics(response.data);
         setLastUpdated(

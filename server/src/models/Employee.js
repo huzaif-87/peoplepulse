@@ -115,5 +115,6 @@ employeeSchema.index({ department: 1, status: 1 });
 employeeSchema.index({ location: 1 });
 employeeSchema.index({ employmentType: 1 });
 employeeSchema.index({ joiningDate: -1 });
+employeeSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("Employee", employeeSchema);
