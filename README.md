@@ -3,7 +3,7 @@
 PeoplePulse is a full-stack employee management platform designed to help HR teams streamline daily workforce operations. It enables HR professionals to manage employees, find talent quickly, analyze workforce data, and gain real-time insights into attendance, performance, payroll financial costs, and retention.
 
 ## 🔗 Live Demo
-
+Note: The backend is hosted on a free Render instance and may take a short time to wake after inactivity.
 **[🚀 Open PeoplePulse Live](https://peoplepulse-phi.vercel.app)**
 
 ## 💻 GitHub Repository
